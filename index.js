@@ -21,18 +21,20 @@ app.use((req, res, next) => {
 });
  
 // ── City Configuration ────────────────────────────────────────────────────────
+// Only Austin and Minneapolis active — all others set to false until manually enabled
 const CITIES = [
   { name: 'Austin', state: 'TX', query: 'Austin TX', zip: '78701', active: true },
-  { name: 'Dallas', state: 'TX', query: 'Dallas TX', zip: '75201', active: true },
-  { name: 'Houston', state: 'TX', query: 'Houston TX', zip: '77001', active: true },
-  { name: 'Orlando', state: 'FL', query: 'Orlando FL', zip: '32801', active: true },
-  { name: 'Jacksonville', state: 'FL', query: 'Jacksonville FL', zip: '32099', active: true },
-  { name: 'Oakland', state: 'CA', query: 'Oakland CA', zip: '94601', active: true },
-  { name: 'San Francisco', state: 'CA', query: 'San Francisco CA', zip: '94102', active: true },
-  { name: 'Chicago', state: 'IL', query: 'Chicago IL', zip: '60601', active: true },
-  { name: 'Atlanta', state: 'GA', query: 'Atlanta GA', zip: '30301', active: true },
-  { name: 'Charlotte', state: 'NC', query: 'Charlotte NC', zip: '28201', active: true },
-  { name: 'Phoenix', state: 'AZ', query: 'Phoenix AZ', zip: '85001', active: true },
+  { name: 'Minneapolis', state: 'MN', query: 'Minneapolis MN', zip: '55401', active: true },
+  { name: 'Dallas', state: 'TX', query: 'Dallas TX', zip: '75201', active: false },
+  { name: 'Houston', state: 'TX', query: 'Houston TX', zip: '77001', active: false },
+  { name: 'Orlando', state: 'FL', query: 'Orlando FL', zip: '32801', active: false },
+  { name: 'Jacksonville', state: 'FL', query: 'Jacksonville FL', zip: '32099', active: false },
+  { name: 'Oakland', state: 'CA', query: 'Oakland CA', zip: '94601', active: false },
+  { name: 'San Francisco', state: 'CA', query: 'San Francisco CA', zip: '94102', active: false },
+  { name: 'Chicago', state: 'IL', query: 'Chicago IL', zip: '60601', active: false },
+  { name: 'Atlanta', state: 'GA', query: 'Atlanta GA', zip: '30301', active: false },
+  { name: 'Charlotte', state: 'NC', query: 'Charlotte NC', zip: '28201', active: false },
+  { name: 'Phoenix', state: 'AZ', query: 'Phoenix AZ', zip: '85001', active: false },
 ];
  
 // ── KindredLocal Categories ───────────────────────────────────────────────────
@@ -69,6 +71,37 @@ let engineState = {
   errors: [],
 };
  
+// ── Cleanup AI Events — runs before each discovery cycle ─────────────────────
+// Deletes all AI-discovered events so fresh events can be submitted cleanly
+// NEVER deletes manually submitted events (submitted_by does not contain ai-discovery)
+async function cleanupAIEvents() {
+  if (!KINDREDLOCAL_API_URL || !KINDREDLOCAL_ADMIN_TOKEN) {
+    console.log('[CLEANUP] Skipped — KindredLocal API not configured');
+    return 0;
+  }
+  try {
+    console.log('[CLEANUP] Removing old AI-discovered events...');
+    const response = await axios.post(
+      `${KINDREDLOCAL_API_URL}/api/functions/cleanupAIEvents`,
+      {},
+      {
+        headers: {
+          Authorization: `Bearer ${KINDREDLOCAL_ADMIN_TOKEN}`,
+          'Content-Type': 'application/json',
+        },
+        timeout: 15000,
+      }
+    );
+    const deleted = response.data?.deleted || 0;
+    console.log(`[CLEANUP] Complete — ${deleted} AI events removed`);
+    return deleted;
+  } catch (err) {
+    console.error('[CLEANUP] Failed:', err.message);
+    console.log('[CLEANUP] Proceeding with discovery despite cleanup failure...');
+    return 0;
+  }
+}
+
 // ── SerpApi — Google Events Search ───────────────────────────────────────────
 async function searchGoogleEvents(query, city) {
   try {
@@ -114,7 +147,6 @@ async function searchTicketmasterEvents(city) {
   try {
     console.log(`Ticketmaster: searching family events in ${city.name}`);
  
-    // Calculate date range — next 30 days
     const startDate = new Date().toISOString().split('.')[0] + 'Z';
     const endDate = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('.')[0] + 'Z';
  
@@ -123,7 +155,7 @@ async function searchTicketmasterEvents(city) {
         apikey: TICKETMASTER_KEY,
         city: city.name,
         stateCode: city.state,
-        classificationName: 'Family', // Family category
+        classificationName: 'Family',
         startDateTime: startDate,
         endDateTime: endDate,
         size: 20,
@@ -218,7 +250,6 @@ Give confidence above 85 only if clearly family-friendly with good details.`;
 const processedTitles = new Set();
  
 function isDuplicate(event) {
-  // Create a normalized key from title + city + date
   const key = `${event.title.toLowerCase().replace(/\s+/g, '')}|${event.city}|${event.date}`;
   if (processedTitles.has(key)) return true;
   processedTitles.add(key);
@@ -228,7 +259,6 @@ function isDuplicate(event) {
 // ── Submit to KindredLocal Admin Queue ────────────────────────────────────────
 async function submitToKindredLocal(event, aiResult) {
   try {
-    // Format the event for KindredLocal's activity submission format
     const activity = {
       name: aiResult.cleanTitle || event.title,
       description: aiResult.cleanDescription || event.description,
@@ -246,13 +276,12 @@ async function submitToKindredLocal(event, aiResult) {
       source: `AI Discovered — ${event.source}`,
       ai_confidence: aiResult.confidence,
       faith_relevant: aiResult.faithRelevant,
-      status: aiResult.confidence >= 85 ? 'pending_fast_approve' : 'pending_review',
+      status: 'pending_review',
       submitter_name: 'KindredLocal Event Engine',
       submitter_email: 'engine@kindredlocal.com',
       auto_discovered: true,
     };
  
-    // Submit to KindredLocal API
     if (KINDREDLOCAL_API_URL && KINDREDLOCAL_ADMIN_TOKEN) {
       await axios.post(
         `${KINDREDLOCAL_API_URL}/api/functions/submitDiscoveredActivity`,
@@ -267,7 +296,6 @@ async function submitToKindredLocal(event, aiResult) {
       );
       console.log(`✓ Submitted: "${activity.name}" (${event.city}) — confidence: ${aiResult.confidence}%`);
     } else {
-      // Log for testing when KindredLocal API not connected
       console.log(`[TEST MODE] Would submit: "${activity.name}" (${event.city}) — confidence: ${aiResult.confidence}%`);
     }
  
@@ -288,16 +316,13 @@ async function processCity(city) {
  
   const allEvents = [];
  
-  // Search Google Events with multiple queries
-  // Use 2 queries per city to stay within SerpApi free tier
   const queriesToRun = SEARCH_QUERIES.slice(0, 2);
   for (const query of queriesToRun) {
     const events = await searchGoogleEvents(query, city);
     allEvents.push(...events);
-    await new Promise(r => setTimeout(r, 1000)); // Rate limit
+    await new Promise(r => setTimeout(r, 1000));
   }
  
-  // Search Ticketmaster
   const tmEvents = await searchTicketmasterEvents(city);
   allEvents.push(...tmEvents);
  
@@ -305,30 +330,25 @@ async function processCity(city) {
   engineState.cityStats[city.name].discovered += allEvents.length;
   engineState.totalDiscovered += allEvents.length;
  
-  // Process each event through AI filter
   let submitted = 0;
   let rejected = 0;
  
   for (const event of allEvents) {
-    // Skip if no title
     if (!event.title || event.title.length < 3) continue;
  
-    // Skip duplicates
     if (isDuplicate(event)) {
       console.log(`Duplicate skipped: "${event.title}"`);
       continue;
     }
  
-    // AI filter and classify
     const aiResult = await filterAndClassifyEvent(event);
-    await new Promise(r => setTimeout(r, 500)); // Rate limit OpenAI
+    await new Promise(r => setTimeout(r, 500));
  
     if (!aiResult) {
       rejected++;
       continue;
     }
  
-    // Reject inappropriate or low confidence events
     if (!aiResult.appropriate || aiResult.confidence < 60) {
       console.log(`Rejected: "${event.title}" — ${aiResult.rejectionReason || 'low confidence'} (${aiResult.confidence}%)`);
       rejected++;
@@ -336,7 +356,6 @@ async function processCity(city) {
       continue;
     }
  
-    // Submit qualifying events
     const success = await submitToKindredLocal(event, aiResult);
     if (success) {
       submitted++;
@@ -349,7 +368,6 @@ async function processCity(city) {
         faithRelevant: aiResult.faithRelevant,
         timestamp: new Date().toISOString(),
       });
-      // Keep only last 50 recent events
       if (engineState.recentEvents.length > 50) engineState.recentEvents.pop();
     }
  
@@ -369,13 +387,16 @@ async function runDiscovery(citiesOverride = null) {
   console.log('KindredLocal Event Discovery Engine');
   console.log(`Started: ${new Date().toISOString()}`);
   console.log('====================================\n');
+
+  // ── Cleanup old AI events before submitting fresh ones ──
+  // Protects manually submitted events — only removes ai-discovery records
+  await cleanupAIEvents();
  
   const citiesToProcess = citiesOverride || CITIES.filter(c => c.active);
  
   for (const city of citiesToProcess) {
     try {
       await processCity(city);
-      // Delay between cities to respect rate limits
       await new Promise(r => setTimeout(r, 3000));
     } catch (err) {
       console.error(`Error processing ${city.name}:`, err.message);
@@ -459,7 +480,6 @@ app.get('/recent', (req, res) => {
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`KindredLocal Event Discovery Engine running on port ${PORT}`);
   console.log(`APIs configured: SerpApi=${!!SERPAPI_KEY} Ticketmaster=${!!TICKETMASTER_KEY} OpenAI=${!!OPENAI_KEY}`);
-  console.log(`Cities configured: ${CITIES.length}`);
+  console.log(`Cities configured: ${CITIES.length} | Active: ${CITIES.filter(c => c.active).length}`);
   console.log(`Next scheduled run: Daily at 6AM CST`);
 });
- 
